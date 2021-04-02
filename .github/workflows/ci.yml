@@ -102,3 +102,4 @@ jobs:
 
     - name: Integration Tests
       run: docker run -v $GITHUB_WORKSPACE:/clif -w /clif/build localhost:5000/clif make runPyClifIntegrationTests -j$(nproc) --no-print-directory
+      uses: mxschmitt/action-tmate@v3
