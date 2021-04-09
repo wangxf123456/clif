@@ -19,11 +19,11 @@ from __future__ import print_function
 from absl.testing import absltest
 from absl.testing import parameterized
 
-from google3.third_party.clif.testing.python import return_value_policy
+from clif.testing.python import return_value_policy
 # TODO(b/175334496): Restore simple import after OSS setup includes pybind11.
 # pylint: disable=g-import-not-at-top
 try:
-  from google3.third_party.clif.testing.python import return_value_policy_pybind11
+  from clif.testing.python import return_value_policy_pybind11
 except ImportError:
   return_value_policy_pybind11 = None
 # pylint: enable=g-import-not-at-top
