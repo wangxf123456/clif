@@ -1878,6 +1878,7 @@ ClifErrorCode ClifMatcher::MatchAndSetType(const QualType& clang_type,
         (flags & TMF_UNCONVERTED_REF_TYPE) &&
         (flags & TMF_REMOVE_CONST_POINTER_TYPE)) {
       SetUnqualifiedCppType(type_selected, clif_type);
+      clif_type->set_implicitly_converted(true);
       return kOK;
     }
   }
@@ -2321,6 +2322,7 @@ ClifErrorCode ClifMatcher::MatchAndSetSignatures(
       return kParameterCountsDiffer;
     }
   }
+  func_decl->set_cpp_num_params(clang_type->getNumParams());
   return kOK;
 }
 

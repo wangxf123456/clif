@@ -88,6 +88,8 @@ add_pyclif_library_for_test(callback callback.clif)
 
 add_pyclif_library_for_test(call_method call_method.clif)
 
+add_pyclif_library_for_test(capsule_fqcppname capsule_fqcppname.clif)
+
 add_pyclif_library_for_test(circular circular.clif)
 
 add_pyclif_library_for_test(classes classes.clif)
@@ -145,6 +147,8 @@ add_pyclif_library_for_test(nested_types nested_types.clif)
 
 add_pyclif_library_for_test(nonzero_mapping nonzero_mapping.clif)
 
+add_pyclif_library_for_test(non_raising non_raising.clif)
+
 add_pyclif_library_for_test(number_methods number_methods.clif)
 
 add_pyclif_library_for_test(operators operators.clif)
@@ -154,6 +158,8 @@ add_pyclif_library_for_test(output_parameter output_parameter.clif)
 add_pyclif_library_for_test(overload overload.clif)
 
 add_pyclif_library_for_test(pass_none pass_none.clif)
+
+add_pyclif_library_for_test(pointer_parameters pointer_parameters.clif)
 
 add_py_library(pickle_compatibility_helper pickle_compatibility_helper.py)
 
@@ -165,7 +171,7 @@ add_pyclif_library_for_test(_pickle_compatibility pickle_compatibility.clif
   TEST pickle_compatibility_test.py
 )
 
-add_pyclif_library_for_test(return_set_as_list return_set_as_list.clif
+add_pyclif_library_for_test(postproc postproc.clif
   PY_DEPS clif_python_postproc
 )
 
@@ -200,6 +206,8 @@ add_pyclif_library_for_test(template_alias template_alias.clif)
 add_pyclif_library_for_test(templates templates.clif)
 
 add_pyclif_library_for_test(top_level_pass top_level_pass.clif)
+
+add_pyclif_library_for_test(type_caster type_caster.clif)
 
 add_pyclif_library_for_test(variables variables.clif)
 

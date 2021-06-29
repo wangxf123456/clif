@@ -105,7 +105,7 @@ class Postprocessor(object):
   """Process parsed IR."""
 
   def __init__(self, config_headers=None, include_paths=('.',), preamble='',
-               py3output=True):
+               py3output=True, gen_pybind11=False):
     self._names = {}  # Keep name->FQN for all 'from path import' statements.
     self._capsules = {}   # Keep raw pointer names (pytype -> cpptype).
     self._typenames = {}  # Keep typedef aliases (pytype -> type_ir).
@@ -119,6 +119,7 @@ class Postprocessor(object):
     # has implements MACRO<actual, param, values>.
     self._macro_values = []
     self._py3output = py3output
+    self._gen_pybind11 = gen_pybind11
 
   def is_pyname_known(self, name):
     return (name in self._capsules or
@@ -377,7 +378,14 @@ class Postprocessor(object):
     assert len(p) in (1, 2), p
     hdr = p[0]
     if not scan_only:
-      pb.usertype_includes.append(hdr)
+      if self._gen_pybind11 and hdr.endswith('_clif.h'):
+        # The generated header file is at
+        # `full/project/path/cheader_pybind11_clif.h` instead of
+        # `full/project/path/cheader_clif.h`
+        hdr = hdr[:-len('_clif.h')] + '_pybind11_clif.h'
+        pb.pybind11_includes.append(hdr)
+      else:
+        pb.usertype_includes.append(hdr)
     # Scan hdr for new types
     namespace = p[1]+'.' if len(p) > 1 else ''
     for root in self._include_paths:
@@ -392,13 +400,7 @@ class Postprocessor(object):
       except IOError:
         pass
     else:
-      # Helpful pointer related to "_clif" infix change, added 2020-06-23.
-      # TODO: Remove this code after a few weeks.
-      if hdr.endswith('_clif.h') or hdr.endswith('_pyclif.h'):
-        go_link = ''
-      else:
-        go_link = ' (maybe related to >>> go/clif_h_infix <<< change?)'
-      raise NameError('include "%s" not found%s' % (hdr, go_link))
+      raise NameError('include "%s" not found' % hdr)
 
   def _import(self, unused_ln, p, unused_pb):
     """from full.python.path import postprocessor."""
@@ -442,7 +444,7 @@ class Postprocessor(object):
     pb.line_number = ln
     pb.decltype = pb.TYPE
     p = pb.fdecl
-    _set_name(p.name, ast.name, ns)
+    _set_name(p.name, ast.name, ns, allow_fqcppname=True)
     self.check_known_name(p.name.native)
     self._capsules[p.name.native] = p.name.cpp_name + ' *'
     return p.name.native
@@ -790,6 +792,9 @@ class Postprocessor(object):
     if 'extend' in decorators:
       f.is_extend_method = True
       decorators.remove('extend')
+    if 'non_raising' in decorators:
+      f.marked_non_raising = True
+      decorators.remove('non_raising')
     if '__enter__' in decorators:
       f.name.native = '__enter__@'  # A hack to flag a ctx mgr.
       decorators.remove('__enter__')

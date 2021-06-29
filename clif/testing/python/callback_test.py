@@ -84,12 +84,11 @@ class CallbackTest(absltest.TestCase):
     wrapper_lib.SelfCallback(Callback)
 
   def testStrCallback(self, wrapper_lib):
-    # 'foo' is str in Py2 and Py3
-    def cb(s):
+    def Cb(s):
       self.assertIsInstance(s, str)
       self.assertEqual(s, 'foo')
 
-    wrapper_lib.StringCallback(cb)
+    wrapper_lib.StringCallback(Cb)
 
   def testCallableOutput(self, wrapper_lib):
     returned_callback = wrapper_lib.FunctionWithCallableReturn(Callback2)

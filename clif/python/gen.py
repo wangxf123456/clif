@@ -771,7 +771,8 @@ def FunctionCall(pyname, wrapper, doc, catch, call, postcall_init,
   if (minargs < nargs or catch) and not void_return_type:
     if catch and return_type.rstrip().endswith('&'):
       convert_ref_to_ptr = True
-      return_type = return_type[:-1] + '*'
+      idx = return_type.rindex('&')
+      return_type = return_type[:idx] + '*'
     if func_ast.returns[0].type.cpp_has_def_ctor:
       yield I+return_type+' ret0;'
     else:
@@ -877,6 +878,7 @@ def FunctionCall(pyname, wrapper, doc, catch, call, postcall_init,
   elif nret:
     yield I+'return Clif_PyObjFrom(std::move(%s0%s), %s);' % (
         ret, ('.value()' if optional_ret0 else ''),
+        'py::postconv::MarkedNonRaising' if func_ast.marked_non_raising else
         postconv.Initializer(func_ast.returns[0].type, typepostconversion))
   elif return_self or ctxmgr == '__enter__@':
     yield I+'Py_INCREF(self);'

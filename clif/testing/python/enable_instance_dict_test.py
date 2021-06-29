@@ -12,21 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import sys
-import unittest
 
-import parameterized
+from absl.testing import absltest
+from absl.testing import parameterized
 
 from clif.testing.python import enable_instance_dict
+# TODO: Restore simple import after OSS setup includes pybind11.
+# pylint: disable=g-import-not-at-top
+try:
+  from clif.testing.python import enable_instance_dict_pybind11
+except ImportError:
+  enable_instance_dict_pybind11 = None
+# pylint: enable=g-import-not-at-top
+
+WRAPPER_LIBS = (('c_api', enable_instance_dict),
+                ('pybind11', enable_instance_dict_pybind11))
 
 TYPES_WITH_DICT = (
-    enable_instance_dict.ConcreteEmptyWithDict,
-    enable_instance_dict.ConcreteEmptyWithDictFinal,
-    enable_instance_dict.ConcreteNonTrivialDestructorWithDict)
+    'ConcreteEmptyWithDict',
+    'ConcreteEmptyWithDictFinal',
+    'ConcreteNonTrivialDestructorWithDict')
+
+
+def MakeNamedParameters():
+  np = []
+  for code_gen, wrapper_lib in WRAPPER_LIBS:
+    if wrapper_lib is not None:
+      for type_with_dict in TYPES_WITH_DICT:
+        np.append(('_'.join((type_with_dict, code_gen)),
+                   getattr(wrapper_lib, type_with_dict)))
+  return np
 
 
 ###############################################################################
@@ -37,37 +53,46 @@ TYPES_WITH_DICT = (
 ###############################################################################
 
 
-class ClassModuleAttrTest(unittest.TestCase):
+@parameterized.named_parameters(
+    [np for np in WRAPPER_LIBS if np[1] is not None])
+class ClassModuleAttrTestOneTypeOnly(absltest.TestCase):
 
-  def testConcreteEmptyNoDict(self):
-    obj = enable_instance_dict.ConcreteEmptyNoDict()
+  def testConcreteEmptyNoDict(self, wrapper_lib):
+    obj = wrapper_lib.ConcreteEmptyNoDict()
     self.assertFalse(hasattr(obj, '__dict__'))
 
-  @parameterized.parameterized.expand(zip(TYPES_WITH_DICT))
+  def testConcreteEmptyWithDictFinal(self, wrapper_lib):
+    # Minimal runtime testing. The main purpose of ConcreteEmptyWithDictFinal
+    # is to test that the .clif file parser can handle multiple decorators.
+    with self.assertRaises(TypeError) as ctx:
+      class _(wrapper_lib.ConcreteEmptyWithDictFinal):
+        pass
+    self.assertIn('is not an acceptable base type', str(ctx.exception))
+
+
+@parameterized.named_parameters(MakeNamedParameters())
+class ClassModuleAttrTestMultipleTypes(absltest.TestCase):
+
   def testConcreteEmptyWithDict(self, type_with_dict):
     obj = type_with_dict()
     self.assertTrue(hasattr(obj, '__dict__'))
-    self.assertEqual(len(obj.__dict__), 0)
+    self.assertEmpty(obj.__dict__)
     obj.color = 'red'
-    self.assertEqual(len(obj.__dict__), 1)
+    self.assertLen(obj.__dict__, 1)
     obj.height = '13'
-    self.assertEqual(len(obj.__dict__), 2)
-    with self.assertRaises(TypeError) as ctx:
+    self.assertLen(obj.__dict__, 2)
+    with self.assertRaises(TypeError):
       obj.__dict__ = ''
-    self.assertEqual(
-        str(ctx.exception),
-        '__dict__ must be set to a dict, not a str')
     initial_dict = obj.__dict__
     self.assertEqual(sys.getrefcount(initial_dict), 3)
     obj.__dict__ = {'seven': 7, 'ate': 8, 'nine': 9}
     self.assertEqual(sys.getrefcount(initial_dict), 2)
-    self.assertEqual(len(obj.__dict__), 3)
+    self.assertLen(obj.__dict__, 3)
     replacement_dict = obj.__dict__
     self.assertEqual(sys.getrefcount(replacement_dict), 3)
     del obj
     self.assertEqual(sys.getrefcount(replacement_dict), 2)
 
-  @parameterized.parameterized.expand(zip(TYPES_WITH_DICT))
   def testReferenceCycle(self, type_with_dict):
     obj = type_with_dict()
     obj.cycle = obj
@@ -78,14 +103,6 @@ class ClassModuleAttrTest(unittest.TestCase):
     del obj_dict['cycle']  # breaks the reference cycle
     self.assertEqual(sys.getrefcount(obj_dict), 2)
 
-  def testConcreteEmptyWithDictFinal(self):
-    # Minimal runtime testing. The main purpose of ConcreteEmptyWithDictFinal
-    # is to test that the .clif file parser can handle multiple decorators.
-    with self.assertRaises(TypeError) as ctx:
-      class _(enable_instance_dict.ConcreteEmptyWithDictFinal):
-        pass
-    self.assertIn('is not an acceptable base type', str(ctx.exception))
-
 
 if __name__ == '__main__':
-  unittest.main()
+  absltest.main()

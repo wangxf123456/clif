@@ -14,12 +14,14 @@
 
 """Generates pybind11 bindings code."""
 
-from typing import Dict, Generator, Text, Set
+from typing import Dict, Generator, List, Text, Set
 
 from clif.protos import ast_pb2
 from clif.pybind11 import classes
 from clif.pybind11 import enums
 from clif.pybind11 import function
+from clif.pybind11 import function_lib
+from clif.pybind11 import type_casters
 from clif.pybind11 import utils
 
 I = utils.I
@@ -28,14 +30,30 @@ I = utils.I
 class ModuleGenerator(object):
   """A class that generates pybind11 bindings code from CLIF ast."""
 
-  def __init__(self, ast: ast_pb2.AST, module_name: Text):
+  def __init__(self, ast: ast_pb2.AST, module_name: str, header_path: str,
+               include_paths: List[str]):
     self._ast = ast
     self._module_name = module_name
+    self._header_path = header_path
+    self._include_paths = include_paths
+    self._unique_classes = {}
 
   def generate_header(self,
-                      unused_ast: ast_pb2.AST) -> Generator[Text, None, None]:
-    # TODO: Generates header file content here.
-    yield ''
+                      ast: ast_pb2.AST) -> Generator[str, None, None]:
+    """Generates pybind11 bindings code from CLIF ast."""
+    includes = set()
+    for decl in ast.decls:
+      includes.add(decl.cpp_file)
+      self._collect_class_cpp_names(decl)
+    yield '#include "third_party/pybind11/include/pybind11/smart_holder.h"'
+    for include in includes:
+      yield f'#include "{include}"'
+    yield '\n'
+    for cpp_name in self._unique_classes:
+      yield f'PYBIND11_SMART_HOLDER_TYPE_CASTERS({cpp_name})'
+    yield '\n'
+    for cpp_name, py_name in self._unique_classes.items():
+      yield f'// CLIF use `{cpp_name}` as {py_name}'
 
   def generate_from(self, ast: ast_pb2.AST):
     """Generates pybind11 bindings code from CLIF ast.
@@ -50,24 +68,22 @@ class ModuleGenerator(object):
 
     # Find and keep track of virtual functions.
     python_override_class_names = {}
-    # Every unique class requires a pybind11 smart holder type cast macro.
-    unique_classes = set()
 
     for decl in ast.decls:
       yield from self._generate_python_override_class_names(
           python_override_class_names, decl)
-      self._collect_class_cpp_names(decl, unique_classes)
+      self._collect_class_cpp_names(decl)
 
-    for c in unique_classes:
-      yield f'PYBIND11_SMART_HOLDER_TYPE_CASTERS({c})'
-    yield '\n'
+    yield from type_casters.generate_from(ast, self._include_paths)
     yield f'PYBIND11_MODULE({self._module_name}, m) {{'
+    yield from self._generate_import_modules(ast)
     yield I+('m.doc() = "CLIF-generated pybind11-based module for '
              f'{ast.source}";')
 
     for decl in ast.decls:
       if decl.decltype == ast_pb2.Decl.Type.FUNC:
-        yield from function.generate_from('m', decl.func, None)
+        for s in function.generate_from('m', decl.func, None):
+          yield I + s
       elif decl.decltype == ast_pb2.Decl.Type.CONST:
         yield from self._generate_const_variables(decl.const)
       elif decl.decltype == ast_pb2.Decl.Type.CLASS:
@@ -75,9 +91,20 @@ class ModuleGenerator(object):
             decl.class_, 'm',
             python_override_class_names.get(decl.class_.name.cpp_name, ''))
       elif decl.decltype == ast_pb2.Decl.Type.ENUM:
-        yield from enums.generate_from(decl.enum, 'm')
+        yield from enums.generate_from('m', decl.enum)
       yield ''
     yield '}'
+
+  def _generate_import_modules(self,
+                               ast: ast_pb2.AST) -> Generator[str, None, None]:
+    for include in ast.pybind11_includes:
+      # Converts `full/project/path/cheader_pybind11_clif.h` to
+      # `full.project.path.cheader_pybind11`
+      names = include.split('/')
+      names.insert(0, 'google3')
+      names[-1] = names[-1][:-len('_clif.h')]
+      module = '.'.join(names)
+      yield f'py::module_::import("{module}");'
 
   def _generate_headlines(self):
     """Generates #includes and headers."""
@@ -86,14 +113,20 @@ class ModuleGenerator(object):
       includes.add(decl.cpp_file)
       if decl.decltype == ast_pb2.Decl.Type.CONST:
         self._generate_const_variables_headers(decl.const, includes)
-    for include in includes:
-      if include:
-        yield f'#include "{include}"'
+    for include in self._ast.pybind11_includes:
+      includes.add(include)
+    for include in self._ast.usertype_includes:
+      includes.add(include)
+    yield '#include "third_party/pybind11/include/pybind11/complex.h"'
+    yield '#include "third_party/pybind11/include/pybind11/functional.h"'
+    yield '#include "third_party/pybind11/include/pybind11/operators.h"'
     yield '#include "third_party/pybind11/include/pybind11/smart_holder.h"'
     yield '// potential future optimization: generate this line only as needed.'
     yield '#include "third_party/pybind11/include/pybind11/stl.h"'
-    yield '#include <pybind11/operators.h>'
-    yield '#include <pybind11/complex.h>'
+    yield ''
+    for include in includes:
+      yield f'#include "{include}"'
+    yield f'#include "{self._header_path}"'
     yield ''
     yield 'namespace py = pybind11;'
     yield ''
@@ -123,8 +156,8 @@ class ModuleGenerator(object):
 
   def _generate_python_override_class_names(
       self, python_override_class_names: Dict[Text, Text], decl: ast_pb2.Decl,
-      overrider_class_name_suffix: str = '_virtual_overrider',
-      self_life_support: str = 'py::virtual_overrider_self_life_support'):
+      trampoline_name_suffix: str = '_trampoline',
+      self_life_support: str = 'py::trampoline_self_life_support'):
     """Generates Python overrides classes dictionary for virtual functions."""
     if decl.decltype == ast_pb2.Decl.Type.CLASS:
       virtual_members = []
@@ -134,68 +167,69 @@ class ModuleGenerator(object):
       if not virtual_members:
         return
       python_override_class_name = (
-          f'{decl.class_.name.native}_{overrider_class_name_suffix}')
+          f'{decl.class_.name.native}_{trampoline_name_suffix}')
       assert decl.class_.name.cpp_name not in python_override_class_names
       python_override_class_names[
           decl.class_.name.cpp_name] = python_override_class_name
       yield (f'struct {python_override_class_name} : '
              f'{decl.class_.name.cpp_name}, {self_life_support} {{')
-      yield I + I + (
+      yield I + (
           f'using {decl.class_.name.cpp_name}::{decl.class_.name.native};')
       for member in virtual_members:
-        yield from self._generate_virtual_function(decl.class_, member)
+        yield from self._generate_virtual_function(
+            decl.class_.name.native, member.func)
       if python_override_class_name:
         yield '};'
 
-  def _generate_virtual_function(self, class_decl: ast_pb2.ClassDecl,
-                                 member: ast_pb2.Decl):
+  def _generate_virtual_function(self,
+                                 class_name: str, func_decl: ast_pb2.FuncDecl):
     """Generates virtual function overrides calling Python methods."""
-
     return_type = ''
-    if member.func.cpp_void_return:
+    if func_decl.cpp_void_return:
       return_type = 'void'
-    elif member.func.returns:
-      for v in member.func.returns:
+    elif func_decl.returns:
+      for v in func_decl.returns:
         if v.HasField('cpp_exact_type'):
           return_type = v.cpp_exact_type
 
-    params_list = []
+    params = ', '.join([f'{p.name.cpp_name}' for p in func_decl.params])
     params_list_with_types = []
-    for param in member.func.params:
-      params_list.append(param.name.native)
+    for p in func_decl.params:
       params_list_with_types.append(
-          f'{param.type.lang_type} {param.name.native}')
-    params_str = ', '.join(params_list)
+          f'{function_lib.generate_param_type(p)} {p.name.cpp_name}')
     params_str_with_types = ', '.join(params_list_with_types)
 
     cpp_const = ''
-    if member.func.cpp_const_method:
-      cpp_const = ' const '
+    if func_decl.cpp_const_method:
+      cpp_const = ' const'
 
-    yield I + I + (f'{return_type} '
-                   f'{member.func.name.native}({params_str_with_types}) '
-                   f'{cpp_const}override {{')
+    yield I + (f'{return_type} '
+               f'{func_decl.name.native}({params_str_with_types}) '
+               f'{cpp_const} override {{')
 
-    if member.func.is_pure_virtual:
+    if func_decl.is_pure_virtual:
       pybind11_override = 'PYBIND11_OVERRIDE_PURE'
     else:
       pybind11_override = 'PYBIND11_OVERRIDE'
 
-    yield I + I + I + f'{pybind11_override}('
-    yield I + I + I + I + f'{return_type},'
-    yield I + I + I + I + f'{class_decl.name.native},'
-    yield I + I + I + I + f'{member.func.name.native},'
-    yield I + I + I + I + f'{params_str}'
-    yield I + I + I + ');'
-    yield I + I + '}'
+    yield I + I + f'{pybind11_override}('
+    yield I + I + I + f'{return_type},'
+    yield I + I + I + f'{class_name},'
+    yield I + I + I + f'{func_decl.name.native},'
+    yield I + I + I + f'{params}'
+    yield I + I + ');'
+    yield I + '}'
 
   def _collect_class_cpp_names(self, decl: ast_pb2.Decl,
-                               unique_classes: Set[Text]):
-    """Traverses the AST and adds every class name to a set."""
+                               parent_name: str = '') -> None:
+    """Adds every class name to a set. Only to be used in this context."""
     if decl.decltype == ast_pb2.Decl.Type.CLASS:
-      unique_classes.add(decl.class_.name.cpp_name)
+      full_native_name = decl.class_.name.native
+      if parent_name:
+        full_native_name = '.'.join([parent_name, decl.class_.name.native])
+      self._unique_classes[decl.class_.name.cpp_name] = full_native_name
       for member in decl.class_.members:
-        self._collect_class_cpp_names(member, unique_classes)
+        self._collect_class_cpp_names(member, full_native_name)
 
 
 def write_to(channel, lines):

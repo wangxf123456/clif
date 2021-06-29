@@ -14,9 +14,10 @@
 
 """Generates pybind11 bindings code for functions."""
 
-from typing import Sequence, Text, Optional
+from typing import Generator, Optional
 
 from clif.protos import ast_pb2
+from clif.pybind11 import function_lib
 from clif.pybind11 import lambdas
 from clif.pybind11 import operators
 from clif.pybind11 import utils
@@ -25,8 +26,10 @@ from clif.pybind11 import utils
 I = utils.I
 
 
-def generate_from(module_name: str, func_decl: ast_pb2.FuncDecl,
-                  class_decl: Optional[ast_pb2.ClassDecl]):
+def generate_from(
+    module_name: str, func_decl: ast_pb2.FuncDecl,
+    class_decl: Optional[ast_pb2.ClassDecl] = None
+) -> Generator[str, None, None]:
   """Generates pybind11 bindings code for functions.
 
   Args:
@@ -38,115 +41,20 @@ def generate_from(module_name: str, func_decl: ast_pb2.FuncDecl,
   Yields:
     pybind11 function bindings code.
   """
-
-  lambda_generated = False
-  for s in lambdas.generate_lambda(func_decl, module_name):
-    yield s
-    if s:
-      lambda_generated = True
-  if lambda_generated:
-    return
-
-  if func_decl.classmethod:
-    for line in _generate_static_method(module_name, func_decl.name.native,
-                                        func_decl.name.cpp_name):
-      yield I + line
-    return
-
-  operator_index = utils.find_operator(func_decl.name.cpp_name)
-  if operator_index >= 0 and utils.is_special_operation(func_decl.name.native):
-    for s in operators.generate_operator(module_name, func_decl,
-                                         operator_index):
-      yield I + s
-      return
-
-  func_name = utils.format_func_name(func_decl.name.native)
-  func_def = I + f'{module_name}.def("{func_name}", '
-  func_def += _generate_cpp_function_cast(func_decl, class_decl)
-  func_def += f'&{func_decl.name.cpp_name}'
-  if func_decl.params:
-    func_def += _generate_params_list(func_decl.params,
-                                      func_decl.is_extend_method)
-  if func_decl.docstring:
-    func_def += f', {_generate_docstring(func_decl.docstring)}'
-  func_def += ');'
-  yield func_def
+  if lambdas.needs_lambda(func_decl, class_decl):
+    yield from lambdas.generate_lambda(module_name, func_decl, class_decl)
+  elif operators.needs_operator_overloading(func_decl):
+    yield from operators.generate_operator(module_name, func_decl)
+  else:
+    yield from _generate_simple_function(module_name, func_decl, class_decl)
 
 
-def _generate_cpp_function_cast(func_decl: ast_pb2.FuncDecl,
-                                class_decl: Optional[ast_pb2.ClassDecl]):
-  """Generates a method signature for each function.
-
-  Args:
-    func_decl: Function declaration in proto format.
-    class_decl: Outer class declaration in proto format. None if the function is
-      not a member of a class.
-
-  Returns:
-    The signature of the function.
-  """
-
-  params_list_types = []
-  for param in func_decl.params:
-    if param.HasField('cpp_exact_type'):
-      if not utils.is_usable_cpp_exact_type(param.cpp_exact_type):
-        params_list_types.append(param.type.cpp_type)
-      else:
-        params_list_types.append(param.cpp_exact_type)
-
-  params_str_types = ', '.join(params_list_types)
-
-  return_type = ''
-  if func_decl.cpp_void_return:
-    return_type = 'void'
-  elif func_decl.returns:
-    for v in func_decl.returns:
-      # There can be only one returns declaration per function.
-      if v.HasField('cpp_exact_type'):
-        return_type = v.cpp_exact_type
-  if not return_type:
-    return_type = 'void'
-
-  class_sig = ''
-  if class_decl and not (func_decl.cpp_opfunction or
-                         func_decl.is_extend_method):
-    class_sig = f'{class_decl.name.cpp_name}::'
-    if func_decl.postproc == '->self' and func_decl.ignore_return_value:
-      return_type = class_decl.name.cpp_name
-
-  cpp_const = ''
-  if func_decl.cpp_const_method:
-    cpp_const = ' const'
-  return (f'\n{I + I}({return_type} ({class_sig}*)'
-          f'\n{I + I}({params_str_types}){cpp_const})'
-          f'\n{I + I}')
-
-
-def _generate_params_list(params: Sequence[ast_pb2.ParamDecl],
-                          is_extend_method: bool) -> Text:
-  """Generates bindings code for function parameters."""
-  params_list = []
-  for i, param in enumerate(params):
-    cpp_name = param.name.cpp_name
-    if cpp_name == 'this' or (i == 0 and is_extend_method):
-      continue
-    if param.default_value:
-      params_list.append(f'py::arg("{cpp_name}") = {param.default_value}')
-    else:
-      params_list.append(f'py::arg("{cpp_name}")')
-  if params_list:
-    return ', ' + ', '.join(params_list)
-  return ''
-
-
-def _generate_docstring(docstring: Text):
-  if docstring:
-    docstring = docstring.strip().replace('\n', r'\n').replace('"', r'\"')
-    return f'"{docstring}"'
-  return '""'
-
-
-def _generate_static_method(class_name: str, func_name_native: str,
-                            func_name_cpp_name: str):
-  yield (f'{class_name}.def_static("{func_name_native}", '
-         f'&{func_name_cpp_name});')
+def _generate_simple_function(
+    module_name: str, func_decl: ast_pb2.FuncDecl,
+    class_decl: Optional[ast_pb2.ClassDecl] = None
+) -> Generator[str, None, None]:
+  func_name = func_decl.name.native.rstrip('#')  # @sequential
+  yield f'{module_name}.{function_lib.generate_def(func_decl)}("{func_name}",'
+  yield I + function_lib.generate_cpp_function_cast(func_decl, class_decl)
+  yield I + f'&{func_decl.name.cpp_name},'
+  yield I + function_lib.generate_function_suffixes(func_decl)

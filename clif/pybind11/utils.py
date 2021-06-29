@@ -14,48 +14,8 @@
 
 """Utility functions for pybind11 code generator."""
 
-import dataclasses
-from clif.protos import ast_pb2
-from clif.python import pytd2proto
-
 # Use two spaces indentation for generated code.
 I = '  '
-
-default_supported_op_types = {'int', 'float', 'double', 'long', 'bool'}
-
-# Dict of python methods that map to C++ operators.
-_SPECIAL = pytd2proto._SPECIAL  # pylint: disable=protected-access
-
-
-def find_operator(s, prefix='::operator'):
-  """Use to find the operator in a cpp_name string."""
-  index = s.find(prefix)
-  if index < 0:
-    return -1
-  index += len(prefix)
-  c = s[index:index + 1]
-  if not c or c == '_' or c.isalnum():
-    return -1
-  return index
-
-
-def convert_operator_param(param_str: str):
-  if param_str in default_supported_op_types:
-    return f'{param_str}()'
-  else:
-    return 'py::self'
-
-
-def format_func_name(name: str):
-  if name.endswith('__#'):
-    return name[:-1]
-  return name
-
-
-def is_special_operation(s) -> bool:
-  if s.endswith('__#'):
-    s = s[:-1]
-  return s in _SPECIAL
 
 
 def is_nested_template(s: str) -> bool:
@@ -68,40 +28,3 @@ def is_nested_template(s: str) -> bool:
 
 def is_usable_cpp_exact_type(s: str) -> bool:
   return not is_nested_template(s) or '&' in s
-
-
-def get_params_strings_from_func_decl(func: ast_pb2.FuncDecl):
-  """Helper for function parameter formatting."""
-
-  params = func.params
-  lang_types = []
-  cpp_names = []
-  params_str_with_types_list = []
-  default_values = []
-
-  for param in params:
-    lang_types.append(param.type.lang_type)
-    cpp_names.append(param.name.cpp_name)
-    params_str_with_types_list.append(
-        f'{param.type.cpp_type} {param.name.cpp_name}')
-    if param.default_value:
-      default_values.append(
-          f'py::arg("{param.name.cpp_name}") = {param.default_value}')
-    else:
-      default_values.append(f'py::arg("{param.name.cpp_name}")')
-
-  result = ParamsStrings(
-      cpp_names=', '.join(cpp_names),
-      lang_types=', '.join(lang_types),
-      names_with_types=', '.join(params_str_with_types_list),
-      default_args=', '.join(default_values))
-  return result
-
-
-# Dataclass used to group together and pass around parameter lists.
-@dataclasses.dataclass
-class ParamsStrings:
-  cpp_names: str
-  lang_types: str
-  names_with_types: str
-  default_args: str

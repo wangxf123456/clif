@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Google LLC
+ * Copyright 2021 Google LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,22 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef CLIF_TESTING_RETURN_SET_AS_LIST_H_
-#define CLIF_TESTING_RETURN_SET_AS_LIST_H_
+#ifndef CLIF_TESTING_CAPSULE_FQCPPNAME_H_
+#define CLIF_TESTING_CAPSULE_FQCPPNAME_H_
 
-#include <set>
-#include <string>
+namespace clif_testing_capsule_fqcppname {
 
-namespace clif_testing {
+struct ForeignType {};
 
-inline std::set<std::string> get_set_string(int size) {
-  std::set<std::string> ss;
-  for (int i = 0; i < size; i++) {
-    ss.insert(std::to_string(i * 3 + 5));
-  }
-  return ss;
-}
+}  // namespace clif_testing_capsule_fqcppname
 
-}  // namespace clif_testing
+// Currently this has to be in the global namespace or the C API code generator
+// will generate invalid Clif_PyObj*() functions.
+inline void UseForeignType(clif_testing_capsule_fqcppname::ForeignType *) {}
 
-#endif  // CLIF_TESTING_RETURN_SET_AS_LIST_H_
+#endif  // CLIF_TESTING_CAPSULE_FQCPPNAME_H_

@@ -1,4 +1,4 @@
-# Copyright 2020 Google LLC
+# Copyright 2021 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from clif.python.postproc import AsSortedList
+from "clif/testing/value_holder_clif_conversions.h" import *
 
-from "clif/testing/return_set_as_list.h":
+from "clif/testing/type_caster.h":
   namespace `clif_testing`:
-    # TODO: Eliminate need for postproc.
-    def get_set_string(size: int) -> `std::set` as list<str>:
-      return AsSortedList(...)
+    def get_value_direct(vh: ValueHolder) -> int
+    def get_value_optional(vh: NoneOr<ValueHolder>) -> int
+    def get_value_variant(vh: OneOf<ValueHolder>) -> int
+    def return_value(v: int) -> ValueHolder
+
+    # Test calling type casters recursively
+    def return_value_list(values: list<int>) -> list<ValueHolder>
