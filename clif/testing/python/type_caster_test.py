@@ -13,10 +13,23 @@
 # limitations under the License.
 
 from absl.testing import absltest
+from absl.testing import parameterized
 
-from clif.testing.python import type_caster_pybind11 as type_caster
+from google3.third_party.clif.testing.python import type_caster
+# TODO(b/175334496): Restore simple import after OSS setup includes pybind11.
+# pylint: disable=g-import-not-at-top
+try:
+  from google3.third_party.clif.testing.python import type_caster_pybind11
+except ImportError:
+  type_caster_pybind11 = None
+# pylint: enable=g-import-not-at-top
 
 
+@parameterized.named_parameters([
+    np for np in zip(('c_api', 'pybind11'), (type_caster,
+                                             type_caster_pybind11))
+    if np[1] is not None
+])
 class TypeCasterTest(absltest.TestCase):
 
   def test_get_values(self):
