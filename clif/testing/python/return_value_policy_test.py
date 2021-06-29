@@ -16,7 +16,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 
 from clif.testing.python import return_value_policy
-# TODO: Restore simple import after OSS setup includes pybind11.
+# TODO(b/175334496): Restore simple import after OSS setup includes pybind11.
 # pylint: disable=g-import-not-at-top
 try:
   from clif.testing.python import return_value_policy_pybind11
