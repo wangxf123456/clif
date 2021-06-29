@@ -32,13 +32,13 @@ except ImportError:
 ])
 class TypeCasterTest(absltest.TestCase):
 
-  def test_get_values(self):
-    self.assertEqual(type_caster.get_value_direct(10), 11)
-    self.assertEqual(type_caster.get_value_optional(12), 13)
-    self.assertEqual(type_caster.get_value_variant(14), 15)
-    self.assertEqual(type_caster.return_value(11), 12)
+  def test_get_values(self, wrapper_lib):
+    self.assertEqual(wrapper_lib.get_value_direct(10), 11)
+    self.assertEqual(wrapper_lib.get_value_optional(12), 13)
+    self.assertEqual(wrapper_lib.get_value_variant(14), 15)
+    self.assertEqual(wrapper_lib.return_value(11), 12)
     self.assertCountEqual(
-        type_caster.return_value_list([11, 12, 13]), [12, 13, 14])
+        wrapper_lib.return_value_list([11, 12, 13]), [12, 13, 14])
 
 
 if __name__ == '__main__':
