@@ -15,11 +15,11 @@
 from absl.testing import absltest
 from absl.testing import parameterized
 
-from google3.third_party.clif.testing.python import type_caster
-# TODO(b/175334496): Restore simple import after OSS setup includes pybind11.
+from clif.testing.python import type_caster
+# TODO: Restore simple import after OSS setup includes pybind11.
 # pylint: disable=g-import-not-at-top
 try:
-  from google3.third_party.clif.testing.python import type_caster_pybind11
+  from clif.testing.python import type_caster_pybind11
 except ImportError:
   type_caster_pybind11 = None
 # pylint: enable=g-import-not-at-top
