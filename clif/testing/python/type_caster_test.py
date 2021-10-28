@@ -16,20 +16,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 
 from clif.testing.python import type_caster
-# TODO: Restore simple import after OSS setup includes pybind11.
-# pylint: disable=g-import-not-at-top
-try:
-  from clif.testing.python import type_caster_pybind11
-except ImportError:
-  type_caster_pybind11 = None
-# pylint: enable=g-import-not-at-top
 
 
-@parameterized.named_parameters([
-    np for np in zip(('c_api', 'pybind11'), (type_caster,
-                                             type_caster_pybind11))
-    if np[1] is not None
-])
 class TypeCasterTest(absltest.TestCase):
 
   def test_get_values(self, wrapper_lib):
@@ -39,6 +27,20 @@ class TypeCasterTest(absltest.TestCase):
     self.assertEqual(wrapper_lib.return_value(11), 12)
     self.assertCountEqual(
         wrapper_lib.return_value_list([11, 12, 13]), [12, 13, 14])
+
+  def test_pyobjfrom_only(self):
+    self.assertEqual(type_caster.return_value_pyobjfrom_only(11), 13)
+
+  def test_pyobjas_only(self):
+    self.assertEqual(type_caster.get_value_pyobjas_only(10), 13)
+
+  @absltest.skipIf(
+      'pybind11' not in type_caster.__doc__,
+      'Legacy PyCLIF does not recognize `Pybind11Ignore` in '
+      '`CLIF use` comments')
+  def test_pybind11_ignore(self):
+    with self.assertRaises(TypeError):
+      type_caster.get_value_pybind11_ignore(10)
 
 
 if __name__ == '__main__':

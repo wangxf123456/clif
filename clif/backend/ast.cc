@@ -308,6 +308,9 @@ clang::ClassTemplateDecl* TranslationUnitAST::GetQualTypeTemplateDecl(
     if (!special) {
       return nullptr;
     }
+    if (special->isTypeAlias()) {
+      return GetQualTypeTemplateDecl(special->getAliasedType(), args);
+    }
     templ = llvm::dyn_cast<clang::ClassTemplateDecl>(
         special->getTemplateName().getAsTemplateDecl());
     if (args) {
@@ -344,7 +347,7 @@ bool TranslationUnitAST::Init(const std::string& code,
                               const std::string& input_file_name) {
   std::vector<std::string> modified_args = args;
   std::string original_arg_0 = args[0];
-  if (FLAGS_install_location != "") {
+  if (!FLAGS_install_location.empty()) {
     modified_args[0] = FLAGS_install_location;
     LLVM_DEBUG(llvm::dbgs()
                << "Using " << modified_args[0] << " for install_location");
@@ -415,8 +418,11 @@ bool TranslationUnitAST::ConstructorIsAccessible(
   auto entity = clang::InitializedEntity::InitializeResult(
       SourceLocation(),
       ast_->getASTContext().getQualifiedType(
-          ctor->getParent()->getTypeForDecl(), clang::Qualifiers()),
-      false);  // NRVO is irrelevant.
+          ctor->getParent()->getTypeForDecl(), clang::Qualifiers())
+#if LLVM_VERSION_MAJOR < 14
+      , false
+#endif
+  );
   Sema& sema = ast_->getSema();
   auto access = sema.CheckConstructorAccess(
       SourceLocation(), ctor,

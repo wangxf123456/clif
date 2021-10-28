@@ -14,13 +14,10 @@
 
 """Tests for clif.python.generator."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 import textwrap
 import unittest
+
 from google.protobuf import text_format
 from clif.protos import ast_pb2
 from clif.python import pyext
@@ -37,19 +34,15 @@ PATH = 'path.to.ext.module.test'
 class ClassTest(unittest.TestCase):
 
   def setUp(self):
-    super(ClassTest, self).setUp()
+    super().setUp()
     tm = ast_pb2.Namemap()
     text_format.Parse("""
         name: "ImportedBase"
         fq_name: "path.python.Base"
       """, tm)
     self.m = pyext.Module(PATH, namemap=(tm,))
-    self.code = (dict(tochar='PyUnicode_AsUTF8', f='',
-                      frchar='PyUnicode_FromString') if self.m.py3output
-                 else
-                 dict(tochar='PyString_AS_STRING',
-                      frchar='PyString_FromString',
-                      f=' | Py_TPFLAGS_CHECKTYPES'))
+    self.code = dict(tochar='PyUnicode_AsUTF8', f='',
+                     frchar='PyUnicode_FromString')
     self.maxDiff = 100000  # pylint: disable=invalid-name
 
   def assertClassEqual(self, proto, class_code, mod_code):
@@ -113,6 +106,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructTy> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static StructTy* ThisPtr(PyObject*);
@@ -136,12 +130,12 @@ class ClassTest(unittest.TestCase):
       }
 
       static PyGetSetDef Properties[] = {
-        {C("a"), get_a, set_a, C("C++ int StructTy.a")},
+        {"a", get_a, set_a, "C++ int StructTy.a"},
         {}
       };
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -153,6 +147,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -168,8 +165,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -180,7 +179,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructTy";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_getset = Properties;
@@ -188,6 +187,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -211,12 +211,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_StructTy"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_StructTy", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("StructTy"));
+            void* p = PyCapsule_GetPointer(base, "StructTy");
             if (!PyErr_Occurred()) {
               StructTy* c = static_cast<StructTy*>(p);
               Py_DECREF(base);
@@ -242,19 +242,22 @@ class ClassTest(unittest.TestCase):
         pyStruct::wrapper_Type =
         pyStruct::_build_heap_type();
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
         return true;
       }
-    """ + ("""
+
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -267,17 +270,7 @@ class ClassTest(unittest.TestCase):
         Py_DECREF(module);
         return nullptr;
       }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyDict_SetItemString(pyStruct::wrapper_Type->tp_dict, "S", Clif_PyObjFrom(static_cast<const char*>(kS), {})) < 0) goto err;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
-        return nullptr;
-      }
-    """))
+    """)
 
   def testCppDerivedStruct(self):
     self.assertClassEqual("""
@@ -307,6 +300,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructTy> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static StructTy* ThisPtr(PyObject*);
@@ -330,7 +324,7 @@ class ClassTest(unittest.TestCase):
       }
 
       static PyGetSetDef Properties[] = {
-        {C("a"), get_a, set_a, C("C++ int StructTy.a")},
+        {"a", get_a, set_a, "C++ int StructTy.a"},
         {}
       };
 
@@ -338,12 +332,12 @@ class ClassTest(unittest.TestCase):
       static PyObject* as_Base_Foo_ptr_constBar_ref(PyObject* self) {
         ::Base<Foo*, const Bar&>* p = ::clif::python::Get(reinterpret_cast<wrapper*>(self)->cpp);
         if (p == nullptr) return nullptr;
-        return PyCapsule_New(p, C("::Base<Foo*, const Bar&>"), nullptr);
+        return PyCapsule_New(p, "::Base<Foo*, const Bar&>", nullptr);
       }
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("as_Base_Foo_ptr_constBar_ref"), (PyCFunction)as_Base_Foo_ptr_constBar_ref, METH_NOARGS, C("Upcast to ::Base<Foo*, const Bar&>*")},
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"as_Base_Foo_ptr_constBar_ref", (PyCFunction)as_Base_Foo_ptr_constBar_ref, METH_NOARGS, "Upcast to ::Base<Foo*, const Bar&>*"},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -355,6 +349,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         Py_BEGIN_ALLOW_THREADS
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_END_ALLOW_THREADS
@@ -372,8 +369,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -384,7 +383,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructTy";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_getset = Properties;
@@ -392,6 +391,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -415,12 +415,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_StructTy"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_StructTy", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("StructTy"));
+            void* p = PyCapsule_GetPointer(base, "StructTy");
             if (!PyErr_Occurred()) {
               StructTy* c = static_cast<StructTy*>(p);
               Py_DECREF(base);
@@ -446,7 +446,7 @@ class ClassTest(unittest.TestCase):
         pyStruct::wrapper_Type =
         pyStruct::_build_heap_type();
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -455,10 +455,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -468,15 +471,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -509,6 +503,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructTy> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static StructTy* ThisPtr(PyObject*);
@@ -532,12 +527,12 @@ class ClassTest(unittest.TestCase):
       }
 
       static PyGetSetDef Properties[] = {
-        {C("a"), get_a, set_a, C("C++ int StructTy.a")},
+        {"a", get_a, set_a, "C++ int StructTy.a"},
         {}
       };
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -549,6 +544,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         Py_BEGIN_ALLOW_THREADS
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_END_ALLOW_THREADS
@@ -566,8 +564,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -578,7 +578,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructTy";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_getset = Properties;
@@ -586,6 +586,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -609,12 +610,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_StructTy"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_StructTy", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("StructTy"));
+            void* p = PyCapsule_GetPointer(base, "StructTy");
             if (!PyErr_Occurred()) {
               StructTy* c = static_cast<StructTy*>(p);
               Py_DECREF(base);
@@ -654,7 +655,7 @@ class ClassTest(unittest.TestCase):
           return false;
         }
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -663,10 +664,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -676,15 +680,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -738,6 +733,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<OutKlass> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static OutKlass* ThisPtr(PyObject*);
@@ -747,6 +743,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<OutKlass::InnKlass> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static OutKlass::InnKlass* ThisPtr(PyObject*);
@@ -776,7 +773,7 @@ class ClassTest(unittest.TestCase):
         PyObject *py = nullptr;
         PyObject *names = PyTuple_New(1);
         if (names == nullptr) return nullptr;
-        if ((py = Py_BuildValue("(NN)", %(frchar)s("A"), PyInt_FromLong(
+        if ((py = Py_BuildValue("(NN)", %(frchar)s("A"), PyLong_FromLong(
               static_cast<typename std::underlying_type<OutKlass::InnKlass::X>::type>(OutKlass::InnKlass::X::A)))
             ) == nullptr) goto err;
         PyTuple_SET_ITEM(names, 0, py);
@@ -802,12 +799,12 @@ class ClassTest(unittest.TestCase):
       static PyObject* _X{};  // set by above func in Init()
 
       static PyGetSetDef Properties[] = {
-        {C("i"), get_i, set_i, C("C++ bool OutKlass::InnKlass.i")},
+        {"i", get_i, set_i, "C++ bool OutKlass::InnKlass.i"},
         {}
       };
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -819,6 +816,9 @@ class ClassTest(unittest.TestCase):
 
       // Inner __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -834,8 +834,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Outer.Inner");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -846,7 +848,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Outer.Inner";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for OutKlass::InnKlass";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_getset = Properties;
@@ -854,6 +856,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -877,12 +880,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_OutKlass_InnKlass"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_OutKlass_InnKlass", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("OutKlass::InnKlass"));
+            void* p = PyCapsule_GetPointer(base, "OutKlass::InnKlass");
             if (!PyErr_Occurred()) {
               OutKlass::InnKlass* c = static_cast<OutKlass::InnKlass*>(p);
               Py_DECREF(base);
@@ -905,7 +908,7 @@ class ClassTest(unittest.TestCase):
       }  // namespace pyInner
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -917,6 +920,9 @@ class ClassTest(unittest.TestCase):
 
       // Outer __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -932,8 +938,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Outer");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -944,13 +952,14 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Outer";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for OutKlass";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_init = _ctor;
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -974,12 +983,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_OutKlass"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_OutKlass", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("OutKlass"));
+            void* p = PyCapsule_GetPointer(base, "OutKlass");
             if (!PyErr_Occurred()) {
               OutKlass* c = static_cast<OutKlass*>(p);
               Py_DECREF(base);
@@ -1005,7 +1014,7 @@ class ClassTest(unittest.TestCase):
         pyOuter::pyInner::wrapper_Type =
         pyOuter::pyInner::_build_heap_type();
         if (PyType_Ready(pyOuter::pyInner::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyOuter::pyInner::wrapper_Type, "__module__", modname);
         Py_INCREF(pyOuter::pyInner::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -1019,10 +1028,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -1044,27 +1056,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        {PyObject* em = PyImport_ImportModule("enum");
-         if (em == nullptr) goto err;
-         _Enum = PyObject_GetAttrString(em, "Enum");
-         _IntEnum = PyObject_GetAttrString(em, "IntEnum");
-         Py_DECREF(em);}
-        if (!_Enum || !_IntEnum) {
-          Py_XDECREF(_Enum);
-          Py_XDECREF(_IntEnum);
-          goto err;
-        }
-        if (PyDict_SetItemString(pyOuter::pyInner::wrapper_Type->tp_dict, "X", (pyOuter::pyInner::_X=pyOuter::pyInner::wrapX())) < 0) goto err;
-        if (PyDict_SetItemString(pyOuter::wrapper_Type->tp_dict, "Inner", reinterpret_cast<PyObject*>(pyOuter::pyInner::wrapper_Type)) < 0) goto err;
-        if (PyModule_AddObject(module, "Outer", reinterpret_cast<PyObject*>(pyOuter::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -1114,6 +1105,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructTy> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static StructTy* ThisPtr(PyObject*);
@@ -1141,12 +1133,12 @@ class ClassTest(unittest.TestCase):
       }
 
       static PyGetSetDef Properties[] = {
-        {C("a"), get_a, set_a, C("C++ int StructTy.getA()")},
+        {"a", get_a, set_a, "C++ int StructTy.getA()"},
         {}
       };
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -1158,6 +1150,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -1173,8 +1168,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -1185,7 +1182,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructTy";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_getset = Properties;
@@ -1193,6 +1190,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -1216,12 +1214,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_StructTy"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_StructTy", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("StructTy"));
+            void* p = PyCapsule_GetPointer(base, "StructTy");
             if (!PyErr_Occurred()) {
               StructTy* c = static_cast<StructTy*>(p);
               Py_DECREF(base);
@@ -1247,7 +1245,7 @@ class ClassTest(unittest.TestCase):
         pyStruct::wrapper_Type =
         pyStruct::_build_heap_type();
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -1256,10 +1254,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -1269,15 +1270,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -1318,6 +1310,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructTy> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static StructTy* ThisPtr(PyObject*);
@@ -1331,15 +1324,15 @@ class ClassTest(unittest.TestCase):
         auto cpp = ThisPtr(self); if (!cpp) return nullptr;
         if (Clif_PyObjAs(value, &cpp->a)) Py_RETURN_NONE;
         PyObject* s = PyObject_Repr(value);
-        PyErr_Format(PyExc_ValueError, "%%s is not valid for x:int", s? PyString_AS_STRING(s): "input");
+        PyErr_Format(PyExc_ValueError, "%%s is not valid for x:int", s? PyUnicode_AsUTF8(s): "input");
         Py_XDECREF(s);
         return nullptr;
       }
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("get_a"), (PyCFunction)get_a, METH_NOARGS, C("get_a()->int  C++ StructTy.a getter")},
-        {C("set_a"), set_a, METH_O, C("set_a(int)  C++ StructTy.a setter")},
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"get_a", (PyCFunction)get_a, METH_NOARGS, "get_a()->int  C++ StructTy.a getter"},
+        {"set_a", set_a, METH_O, "set_a(int)  C++ StructTy.a setter"},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -1351,6 +1344,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -1366,8 +1362,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -1378,13 +1376,14 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructTy";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_init = _ctor;
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -1408,12 +1407,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_StructTy"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_StructTy", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("StructTy"));
+            void* p = PyCapsule_GetPointer(base, "StructTy");
             if (!PyErr_Occurred()) {
               StructTy* c = static_cast<StructTy*>(p);
               Py_DECREF(base);
@@ -1439,7 +1438,7 @@ class ClassTest(unittest.TestCase):
         pyStruct::wrapper_Type =
         pyStruct::_build_heap_type();
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -1448,10 +1447,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -1461,15 +1463,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -1539,6 +1532,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructTy> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static PyObject* get_a(PyObject* self, void* xdata) {
@@ -1566,13 +1560,13 @@ class ClassTest(unittest.TestCase):
       }
 
       static PyGetSetDef Properties[] = {
-        {C("a"), get_a, set_a, C("C++ int StructTy.getA()")},
-        {C("b"), get_b, nullptr, C("C++ int StructTy.getB()")},
+        {"a", get_a, set_a, "C++ int StructTy.getA()"},
+        {"b", get_b, nullptr, "C++ int StructTy.getB()"},
         {}
       };
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -1584,6 +1578,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -1599,8 +1596,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -1611,7 +1610,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructTy";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_getset = Properties;
@@ -1619,6 +1618,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -1652,7 +1652,7 @@ class ClassTest(unittest.TestCase):
         pyStruct::wrapper_Type =
         pyStruct::_build_heap_type();
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -1661,10 +1661,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -1674,15 +1677,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -1711,6 +1705,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructCpp> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       // f()
@@ -1721,8 +1716,8 @@ class ClassTest(unittest.TestCase):
       }
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("f"), (PyCFunction)wrapf, METH_NOARGS, C("f()\n  Calls C++ function\n  void f()")},
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"f", (PyCFunction)wrapf, METH_NOARGS, "f()\n  Calls C++ function\n  void f()"},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -1734,6 +1729,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -1749,8 +1747,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -1761,13 +1761,14 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructCpp";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_init = _ctor;
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -1801,7 +1802,7 @@ class ClassTest(unittest.TestCase):
         pyStruct::wrapper_Type =
         pyStruct::_build_heap_type();
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -1810,10 +1811,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -1823,15 +1827,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -1871,6 +1866,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<Overrider> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       static StructCpp* ThisPtr(PyObject*);
@@ -1891,13 +1887,13 @@ class ClassTest(unittest.TestCase):
       static PyObject* as_StructCpp(PyObject* self) {
         StructCpp* p = ::clif::python::Get(reinterpret_cast<wrapper*>(self)->cpp);
         if (p == nullptr) return nullptr;
-        return PyCapsule_New(p, C("StructCpp"), nullptr);
+        return PyCapsule_New(p, "StructCpp", nullptr);
       }
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("F"), (PyCFunction)wrapf_as_F, METH_NOARGS, C("F()\n  Calls C++ function\n  void ::StructCpp::f()")},
-        {C("as_StructCpp"), (PyCFunction)as_StructCpp, METH_NOARGS, C("Upcast to StructCpp*")},
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"F", (PyCFunction)wrapf_as_F, METH_NOARGS, "F()\n  Calls C++ function\n  void ::StructCpp::f()"},
+        {"as_StructCpp", (PyCFunction)as_StructCpp, METH_NOARGS, "Upcast to StructCpp*"},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -1909,6 +1905,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         Py_BEGIN_ALLOW_THREADS
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_END_ALLOW_THREADS
@@ -1926,8 +1925,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -1938,13 +1939,14 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructCpp";
         ty->tp_methods = MethodsStaticAlloc;
         ty->tp_init = _ctor;
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -1969,12 +1971,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_StructCpp"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_StructCpp", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("StructCpp"));
+            void* p = PyCapsule_GetPointer(base, "StructCpp");
             if (!PyErr_Occurred()) {
               StructCpp* c = static_cast<StructCpp*>(p);
               Py_DECREF(base);
@@ -2000,7 +2002,7 @@ class ClassTest(unittest.TestCase):
         pyStruct::wrapper_Type =
         pyStruct::_build_heap_type();
         if (PyType_Ready(pyStruct::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -2009,10 +2011,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -2022,15 +2027,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -2073,6 +2069,7 @@ class ClassTest(unittest.TestCase):
       struct wrapper {
         PyObject_HEAD
         ::clif::Instance<StructCpp> cpp;
+        PyObject* weakrefs = nullptr;
       };
 
       namespace py__iter__ {
@@ -2111,8 +2108,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct.__iter__");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -2143,7 +2142,7 @@ class ClassTest(unittest.TestCase):
       }
 
       static PyMethodDef MethodsStaticAlloc[] = {
-        {C("__reduce_ex__"), (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, C("Helper for pickle.")},
+        {"__reduce_ex__", (PyCFunction)::clif::ReduceExImpl, METH_VARARGS | METH_KEYWORDS, "Helper for pickle."},
         {}
       };
 
@@ -2155,6 +2154,9 @@ class ClassTest(unittest.TestCase):
 
       // Struct __del__
       static void _dtor(PyObject* self) {
+        if (reinterpret_cast<wrapper*>(self)->weakrefs) {
+          PyObject_ClearWeakRefs(self);
+        }
         reinterpret_cast<wrapper*>(self)->cpp.Destruct();
         Py_TYPE(self)->tp_free(self);
       }
@@ -2170,8 +2172,10 @@ class ClassTest(unittest.TestCase):
             (PyHeapTypeObject *) PyType_Type.tp_alloc(&PyType_Type, 0);
         if (!heap_type)
           return nullptr;
-        heap_type->ht_name = (PyObject *) PyString_FromString(
+        heap_type->ht_qualname = (PyObject *) PyUnicode_FromString(
             "Struct");
+        Py_INCREF(heap_type->ht_qualname);
+        heap_type->ht_name = heap_type->ht_qualname;
         PyTypeObject *ty = &heap_type->ht_type;
         ty->tp_as_number = &heap_type->as_number;
         ty->tp_as_sequence = &heap_type->as_sequence;
@@ -2182,7 +2186,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_name = "path.to.ext.module.test.Struct";
         ty->tp_basicsize = sizeof(wrapper);
         ty->tp_dealloc = _dtor;
-        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        ty->tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
         ty->tp_doc = "CLIF wrapper for StructCpp";
         ty->tp_iter = new_iter;
         ty->tp_methods = MethodsStaticAlloc;
@@ -2190,6 +2194,7 @@ class ClassTest(unittest.TestCase):
         ty->tp_alloc = _new;
         ty->tp_new = PyType_GenericNew;
         ty->tp_free = _del;
+        ty->tp_weaklistoffset = offsetof(wrapper, weakrefs);
         return ty;
       }
 
@@ -2213,12 +2218,12 @@ class ClassTest(unittest.TestCase):
         if (Py_TYPE(py) == wrapper_Type) {
           return ::clif::python::Get(reinterpret_cast<wrapper*>(py)->cpp);
         }
-        PyObject* base = PyObject_CallMethod(py, C("as_StructCpp"), nullptr);
+        PyObject* base = PyObject_CallMethod(py, "as_StructCpp", nullptr);
         if (base == nullptr) {
           PyErr_Clear();
         } else {
           if (PyCapsule_CheckExact(base)) {
-            void* p = PyCapsule_GetPointer(base, C("StructCpp"));
+            void* p = PyCapsule_GetPointer(base, "StructCpp");
             if (!PyErr_Occurred()) {
               StructCpp* c = static_cast<StructCpp*>(p);
               Py_DECREF(base);
@@ -2244,7 +2249,7 @@ class ClassTest(unittest.TestCase):
         pyStruct::py__iter__::wrapper_Type =
         pyStruct::py__iter__::_build_heap_type();
         if (PyType_Ready(pyStruct::py__iter__::wrapper_Type) < 0) return false;
-        PyObject *modname = PyString_FromString(ThisModuleName);
+        PyObject *modname = PyUnicode_FromString(ThisModuleName);
         if (modname == nullptr) return false;
         PyObject_SetAttrString((PyObject *) pyStruct::py__iter__::wrapper_Type, "__module__", modname);
         Py_INCREF(pyStruct::py__iter__::wrapper_Type);  // For PyModule_AddObject to steal.
@@ -2258,10 +2263,13 @@ class ClassTest(unittest.TestCase):
     """ + ("""
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -2271,15 +2279,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        if (PyModule_AddObject(module, "Struct", reinterpret_cast<PyObject*>(pyStruct::wrapper_Type)) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """))
@@ -2305,11 +2304,11 @@ class ClassTest(unittest.TestCase):
         PyObject *py = nullptr;
         PyObject *names = PyTuple_New(2);
         if (names == nullptr) return nullptr;
-        if ((py = Py_BuildValue("(NN)", %(frchar)s("ONE"), PyInt_FromLong(
+        if ((py = Py_BuildValue("(NN)", %(frchar)s("ONE"), PyLong_FromLong(
               static_cast<typename std::underlying_type<myEnum>::type>(myEnum::kOne)))
             ) == nullptr) goto err;
         PyTuple_SET_ITEM(names, 0, py);
-        if ((py = Py_BuildValue("(NN)", %(frchar)s("TWO"), PyInt_FromLong(
+        if ((py = Py_BuildValue("(NN)", %(frchar)s("TWO"), PyLong_FromLong(
               static_cast<typename std::underlying_type<myEnum>::type>(myEnum::TWO)))
             ) == nullptr) goto err;
         PyTuple_SET_ITEM(names, 1, py);
@@ -2340,10 +2339,13 @@ class ClassTest(unittest.TestCase):
 
       static struct PyModuleDef Module = {
         PyModuleDef_HEAD_INIT,
-        ThisModuleName,  // module name
+        ThisModuleName,
         "CLIF-generated module for test.h", // module doc
         -1,  // module keeps state in global variables
-        nullptr
+        nullptr,
+        nullptr,  // m_slots a.k.a. m_reload
+        nullptr,  // m_traverse
+        ClearImportCache  // m_clear
       };
 
       PyObject* Init() {
@@ -2363,29 +2365,6 @@ class ClassTest(unittest.TestCase):
         return module;
       err:
         Py_DECREF(module);
-        return nullptr;
-      }
-    """ if self.m.py3output else """
-      bool Ready() {
-        return true;
-      }
-
-      PyObject* Init() {
-        PyObject* module = Py_InitModule3(ThisModuleName, nullptr, "CLIF-generated module for test.h");
-        if (!module) return nullptr;
-        {PyObject* em = PyImport_ImportModule("enum");
-         if (em == nullptr) goto err;
-         _Enum = PyObject_GetAttrString(em, "Enum");
-         _IntEnum = PyObject_GetAttrString(em, "IntEnum");
-         Py_DECREF(em);}
-        if (!_Enum || !_IntEnum) {
-          Py_XDECREF(_Enum);
-          Py_XDECREF(_IntEnum);
-          goto err;
-        }
-        if (PyModule_AddObject(module, "MyEnum", (_MyEnum=wrapmyEnum())) < 0) goto err;
-        return module;
-      err:
         return nullptr;
       }
     """)

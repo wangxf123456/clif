@@ -12,8 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from "clif/testing/supress_upcasts.h":
-  namespace `clif_testing`:
-    @supress_upcasts
-    class DerivedSupressUpcasts:
-      def value(self) -> int
+"""Tests for clif.testing.python.suppress_upcasts."""
+
+from absl.testing import absltest
+
+from clif.testing.python import suppress_upcasts
+
+
+class SpupressUpcastsTest(absltest.TestCase):
+
+  def testClassWithoutUpcasts(self):
+    obj = suppress_upcasts.DerivedSuppressUpcasts()
+    self.assertEqual(obj.value(), 20)
+
+
+if __name__ == '__main__':
+  absltest.main()

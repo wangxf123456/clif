@@ -27,6 +27,7 @@ headers are included.
 #include "Python.h"
 #include <functional>
 #include <deque>
+#include <iterator>
 #include <list>
 #include <queue>
 #include <stack>
@@ -284,6 +285,11 @@ class Iterator {
   static_assert(std::is_same<T&,
                 typename std::iterator_traits<ContainerIter>::reference>::value,
       "Iterators returning proxy refererence not currently supported.");
+  static_assert(
+      std::is_base_of_v<
+          std::forward_iterator_tag,
+          typename std::iterator_traits<ContainerIter>::iterator_category>,
+      "Input iterators are not currently supported.");
 
   const T* Next() noexcept {
     if (!self_) return nullptr;
@@ -713,7 +719,8 @@ PyObject* Clif_PyObjFrom(std::list<T, Args...>&& c, const py::PostConv& pc) {
   return py::ListFromSizableCont(std::move(c), pc);
 }
 template<typename T, typename... Args>
-PyObject* Clif_PyObjFrom(const std::queue<T, Args...>& c, const py::PostConv& pc) {
+PyObject* Clif_PyObjFrom(const std::queue<T, Args...>& c,
+                         const py::PostConv& pc) {
   return py::ListFromSizableCont(c, pc);
 }
 template<typename T, typename... Args>
@@ -832,11 +839,7 @@ bool IterToCont(PyObject* py, Inserter add) {
 // to a C++ container via functor add.
 template<typename T, typename U, typename F>
 bool ItemsToMap(PyObject* py, F add) {
-#if PY_MAJOR_VERSION < 3
-  py = PyObject_CallMethod(py, C("iteritems"), nullptr);
-#else
-  py = PyObject_CallMethod(py, C("items"), nullptr);
-#endif
+  py = PyObject_CallMethod(py, "items", nullptr);
   if (py == nullptr) return false;
   bool ok = py::IterToCont<std::pair<T, U>>(py, add);
   Py_DECREF(py);

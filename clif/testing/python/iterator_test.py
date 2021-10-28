@@ -14,27 +14,17 @@
 
 """Tests for clif.testing.python.iterator."""
 
+import weakref
+
 from absl.testing import absltest
-from absl.testing import parameterized
 
 from clif.testing.python import iterator
-# TODO: Restore simple import after OSS setup includes pybind11.
-# pylint: disable=g-import-not-at-top
-try:
-  from clif.testing.python import iterator_pybind11
-except ImportError:
-  iterator_pybind11 = None
-# pylint: enable=g-import-not-at-top
 
 
-@parameterized.named_parameters([
-    np for np in zip(('c_api', 'pybind11'), (iterator, iterator_pybind11))
-    if np[1] is not None
-])
 class IteratorTest(absltest.TestCase):
 
-  def testR5(self, wrapper_lib):
-    r = wrapper_lib.Ring5()
+  def testR5(self):
+    r = iterator.Ring5()
     self.assertFalse(r)
     with self.assertRaises(RuntimeError):
       r.pop()
@@ -53,6 +43,13 @@ class IteratorTest(absltest.TestCase):
     self.assertEqual(list(r), [3, 4, 5, 6])
     r.clear()
     self.assertFalse(r)
+
+  def test_weakref(self):
+    r = iterator.Ring5()
+    self.assertIsNotNone(weakref.ref(r)())
+    with self.assertRaises(TypeError) as ctx:
+      weakref.ref(iter(r))
+    self.assertIn('cannot create weak reference', str(ctx.exception))
 
 
 if __name__ == '__main__':

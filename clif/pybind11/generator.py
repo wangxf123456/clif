@@ -14,29 +14,41 @@
 
 """Generates pybind11 bindings code."""
 
-from typing import Dict, Generator, List, Text, Set
+import itertools
+import re
+from typing import Dict, Generator, List, Text
 
 from clif.protos import ast_pb2
 from clif.pybind11 import classes
 from clif.pybind11 import enums
 from clif.pybind11 import function
-from clif.pybind11 import function_lib
+from clif.pybind11 import gen_type_info
 from clif.pybind11 import type_casters
 from clif.pybind11 import utils
 
 I = utils.I
 
+_IMPORTMODULEPATTERN = r'module_path:(?P<module_path>.*)'
+
 
 class ModuleGenerator(object):
   """A class that generates pybind11 bindings code from CLIF ast."""
 
-  def __init__(self, ast: ast_pb2.AST, module_name: str, header_path: str,
+  def __init__(self, ast: ast_pb2.AST, module_path: str, header_path: str,
                include_paths: List[str]):
     self._ast = ast
-    self._module_name = module_name
+    self._module_path = module_path
+    self._module_name = module_path.split('.')[-1]
     self._header_path = header_path
     self._include_paths = include_paths
-    self._unique_classes = {}
+    self._types = []
+    self._all_types = set()
+
+  def register_types(self, ast: ast_pb2.AST) -> None:
+    """Preprocess the ast to collect type information."""
+    for decl in ast.decls:
+      self._register_types(decl)
+    self._types = sorted(self._types, key=lambda gen_type: gen_type.cpp_name)
 
   def generate_header(self,
                       ast: ast_pb2.AST) -> Generator[str, None, None]:
@@ -44,16 +56,23 @@ class ModuleGenerator(object):
     includes = set()
     for decl in ast.decls:
       includes.add(decl.cpp_file)
-      self._collect_class_cpp_names(decl)
     yield '#include "third_party/pybind11/include/pybind11/smart_holder.h"'
     for include in includes:
       yield f'#include "{include}"'
-    yield '\n'
-    for cpp_name in self._unique_classes:
-      yield f'PYBIND11_SMART_HOLDER_TYPE_CASTERS({cpp_name})'
-    yield '\n'
-    for cpp_name, py_name in self._unique_classes.items():
-      yield f'// CLIF use `{cpp_name}` as {py_name}'
+    yield ''
+    for typedef in self._types:
+      yield from typedef.generate_type_caster()
+    yield ''
+
+    for namespace, typedefs in itertools.groupby(
+        self._types, lambda gen_type: gen_type.cpp_namespace):
+      namespace = namespace.strip(':') or 'clif'
+      yield ' '.join('namespace %s {' % ns for ns in namespace.split('::'))
+      for t in typedefs:
+        yield from t.generate_header()
+      yield '} ' * (1 + namespace.count('::')) + ' // namespace ' + namespace
+    yield ''
+    yield f'// CLIF init_module module_path:{self._module_path}'
 
   def generate_from(self, ast: ast_pb2.AST):
     """Generates pybind11 bindings code from CLIF ast.
@@ -72,13 +91,24 @@ class ModuleGenerator(object):
     for decl in ast.decls:
       yield from self._generate_python_override_class_names(
           python_override_class_names, decl)
-      self._collect_class_cpp_names(decl)
+
+    imported_types = type_casters.get_imported_types(ast, self._include_paths)
+    known_types = set([t.cpp_name for t in self._types])
+    unknown_types = self._all_types.difference(imported_types).difference(
+        known_types)
+    for unknown_type in unknown_types:
+      yield f'PYBIND11_SMART_HOLDER_TYPE_CASTERS({unknown_type})'
 
     yield from type_casters.generate_from(ast, self._include_paths)
     yield f'PYBIND11_MODULE({self._module_name}, m) {{'
     yield from self._generate_import_modules(ast)
     yield I+('m.doc() = "CLIF-generated pybind11-based module for '
              f'{ast.source}";')
+    yield I + 'py::google::ImportStatusModule();'
+    for i, unknown_type in enumerate(unknown_types):
+      yield I + '{'
+      yield I + I+ f'py::classh<{unknown_type}> CLIFBase{i}(m, "CLIFBase{i}");'
+      yield I + '}'
 
     for decl in ast.decls:
       if decl.decltype == ast_pb2.Decl.Type.FUNC:
@@ -94,27 +124,29 @@ class ModuleGenerator(object):
         yield from enums.generate_from('m', decl.enum)
       yield ''
     yield '}'
+    yield ''
+    for namespace, typedefs in itertools.groupby(
+        self._types, lambda gen_type: gen_type.cpp_namespace):
+      namespace = namespace.strip(':') or 'clif'
+      yield ' '.join('namespace %s {' % ns for ns in namespace.split('::'))
+      for t in typedefs:
+        yield from t.generate_converters()
+      yield '} ' * (1 + namespace.count('::')) + ' // namespace ' + namespace
 
   def _generate_import_modules(self,
                                ast: ast_pb2.AST) -> Generator[str, None, None]:
-    for include in ast.pybind11_includes:
-      # Converts `full/project/path/cheader_pybind11_clif.h` to
-      # `full.project.path.cheader_pybind11`
-      names = include.split('/')
-      names.insert(0, 'google3')
-      names[-1] = names[-1][:-len('_clif.h')]
-      module = '.'.join(names)
-      yield f'py::module_::import("{module}");'
+    """Generates pybind11 module imports."""
+    for init in ast.extra_init:
+      res = re.search(_IMPORTMODULEPATTERN, init)
+      if res:
+        module_path = res.group('module_path')
+        yield I + f'py::module_::import("{module_path}");'
 
   def _generate_headlines(self):
     """Generates #includes and headers."""
     includes = set()
     for decl in self._ast.decls:
       includes.add(decl.cpp_file)
-      if decl.decltype == ast_pb2.Decl.Type.CONST:
-        self._generate_const_variables_headers(decl.const, includes)
-    for include in self._ast.pybind11_includes:
-      includes.add(include)
     for include in self._ast.usertype_includes:
       includes.add(include)
     yield '#include "third_party/pybind11/include/pybind11/complex.h"'
@@ -124,21 +156,15 @@ class ModuleGenerator(object):
     yield '// potential future optimization: generate this line only as needed.'
     yield '#include "third_party/pybind11/include/pybind11/stl.h"'
     yield ''
+    yield '#include "clif/pybind11/runtime.h"'
+    yield '#include "clif/pybind11/type_casters.h"'
+    yield ''
     for include in includes:
       yield f'#include "{include}"'
     yield f'#include "{self._header_path}"'
     yield ''
     yield 'namespace py = pybind11;'
     yield ''
-
-  def _generate_const_variables_headers(self, const_decl: ast_pb2.ConstDecl,
-                                        includes: Set[str]):
-    if const_decl.type.lang_type == 'complex':
-      includes.add('third_party/pybind11/include/pybind11/complex.h')
-    if (const_decl.type.lang_type.startswith('list<') or
-        const_decl.type.lang_type.startswith('dict<') or
-        const_decl.type.lang_type.startswith('set<')):
-      includes.add('third_party/pybind11/include/pybind11/stl.h')
 
   def _generate_const_variables(self, const_decl: ast_pb2.ConstDecl):
     """Generates variables."""
@@ -196,7 +222,7 @@ class ModuleGenerator(object):
     params_list_with_types = []
     for p in func_decl.params:
       params_list_with_types.append(
-          f'{function_lib.generate_param_type(p)} {p.name.cpp_name}')
+          f'{p.cpp_exact_type} {p.name.cpp_name}')
     params_str_with_types = ', '.join(params_list_with_types)
 
     cpp_const = ''
@@ -220,16 +246,50 @@ class ModuleGenerator(object):
     yield I + I + ');'
     yield I + '}'
 
-  def _collect_class_cpp_names(self, decl: ast_pb2.Decl,
-                               parent_name: str = '') -> None:
-    """Adds every class name to a set. Only to be used in this context."""
+  def _register_types(self, decl: ast_pb2.Decl, parent_py_name: str = '',
+                      cpp_namespace: str = '') -> None:
+    """Register classes and enums defined in the ast."""
+    cpp_namespace = decl.namespace_ if decl.namespace_ else cpp_namespace
     if decl.decltype == ast_pb2.Decl.Type.CLASS:
-      full_native_name = decl.class_.name.native
-      if parent_name:
-        full_native_name = '.'.join([parent_name, decl.class_.name.native])
-      self._unique_classes[decl.class_.name.cpp_name] = full_native_name
+      py_name = decl.class_.name.native
+      if parent_py_name:
+        py_name = '.'.join([parent_py_name, py_name])
+      class_type = gen_type_info.ClassType(
+          cpp_name=decl.class_.name.cpp_name, py_name=py_name,
+          cpp_namespace=cpp_namespace)
+      self._types.append(class_type)
+      if not decl.class_.suppress_upcasts:
+        bases = list(decl.class_.bases)
+        i = 0
+        while i < len(bases):
+          base = bases[i]
+          # Note: We are using a hack to avoid redefining aliased types. When
+          # a class inherits another class that is already defined in the .clif
+          # file, it is possible that base.cpp_name is an aliased name.
+          # Therefore we might generate duplicated wrapper code for the same
+          # class.
+          if base.native and not base.cpp_name:
+            # The class inherits from another class defined in .clif file. Two
+            # base definitions whose indexes are consecutive exist in the ast
+            # that refers to the same class.
+            assert i + 1 < len(bases), ('Cannot find cpp name for class '
+                                        f'{base.native}')
+            assert bases[i+1].cpp_name, f'Unexpected base class {bases[i+1]}'
+            i += 2
+          else:
+            if base.cpp_name:
+              self._all_types.add(base.cpp_name)
+            i += 1
       for member in decl.class_.members:
-        self._collect_class_cpp_names(member, full_native_name)
+        self._register_types(member, py_name, cpp_namespace)
+    elif decl.decltype == ast_pb2.Decl.Type.ENUM:
+      py_name = decl.enum.name.native
+      if parent_py_name:
+        py_name = '.'.join([parent_py_name, py_name])
+      enum_type = gen_type_info.EnumType(
+          cpp_name=decl.enum.name.cpp_name, py_name=py_name,
+          cpp_namespace=cpp_namespace)
+      self._types.append(enum_type)
 
 
 def write_to(channel, lines):

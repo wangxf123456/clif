@@ -12,22 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for clif.pybind11.staging.nested_inheritance.
-
-This file is a copy of clif/testing/python/nested_inheritance_test.
-"""
-
-import unittest
-from clif.pybind11.staging import nested_inheritance
-
-
-class NestedInheritanceTest(unittest.TestCase):
-
-  def testInheritInner(self):
-    n = nested_inheritance.InheritInner()
-    n.a = 100
-    self.assertEqual(n.a, 100)
-
-
-if __name__ == '__main__':
-  unittest.main()
+from "clif/testing/suppress_upcasts.h":
+  namespace `clif_testing`:
+    @suppress_upcasts
+    class DerivedSuppressUpcasts:
+      def value(self) -> int

@@ -24,8 +24,6 @@ In case of errors it will raise an exception. Possible exceptions are:
   SyntaxError - wrong construct or statement usage
 """
 
-from __future__ import print_function
-
 import codecs
 import contextlib
 import os
@@ -104,8 +102,7 @@ def _read_include(input_stream, fname, prefix, typetable, capsules, interfaces,
 class Postprocessor(object):
   """Process parsed IR."""
 
-  def __init__(self, config_headers=None, include_paths=('.',), preamble='',
-               py3output=True, gen_pybind11=False):
+  def __init__(self, config_headers=None, include_paths=('.',), preamble=''):
     self._names = {}  # Keep name->FQN for all 'from path import' statements.
     self._capsules = {}   # Keep raw pointer names (pytype -> cpptype).
     self._typenames = {}  # Keep typedef aliases (pytype -> type_ir).
@@ -118,8 +115,6 @@ class Postprocessor(object):
     # _macro_values [actual, param, values] only set in _class that
     # has implements MACRO<actual, param, values>.
     self._macro_values = []
-    self._py3output = py3output
-    self._gen_pybind11 = gen_pybind11
 
   def is_pyname_known(self, name):
     return (name in self._capsules or
@@ -286,7 +281,7 @@ class Postprocessor(object):
         self._gather_dispatch(
             child,
             # Explicitly clear namespace to prevent the namespace from being
-            # redundantly and errorneously prepended to nested types. This
+            # redundantly and erroneously prepended to nested types. This
             # also mimics the normal parsing behavior.
             namespace=None)
 
@@ -378,14 +373,7 @@ class Postprocessor(object):
     assert len(p) in (1, 2), p
     hdr = p[0]
     if not scan_only:
-      if self._gen_pybind11 and hdr.endswith('_clif.h'):
-        # The generated header file is at
-        # `full/project/path/cheader_pybind11_clif.h` instead of
-        # `full/project/path/cheader_clif.h`
-        hdr = hdr[:-len('_clif.h')] + '_pybind11_clif.h'
-        pb.pybind11_includes.append(hdr)
-      else:
-        pb.usertype_includes.append(hdr)
+      pb.usertype_includes.append(hdr)
     # Scan hdr for new types
     namespace = p[1]+'.' if len(p) > 1 else ''
     for root in self._include_paths:
@@ -494,9 +482,9 @@ class Postprocessor(object):
       if 'enable_instance_dict' in decorators:
         p.enable_instance_dict = True
         decorators.remove('enable_instance_dict')
-      if 'supress_upcasts' in decorators:
-        p.supress_upcasts = True
-        decorators.remove('supress_upcasts')
+      if 'suppress_upcasts' in decorators:
+        p.suppress_upcasts = True
+        decorators.remove('suppress_upcasts')
     if decorators:
       raise NameError('Unknown class decorator(s)%s: %s'
                       % (atln, ', '.join(decorators)))
@@ -629,7 +617,7 @@ class Postprocessor(object):
     Returns:
       True if ast is a @getter/@setter func that describes 'unproperty' C++ var.
     Raises:
-      ValueError: if @getter or @setter refers to exising var with =property().
+      ValueError: if @getter or @setter refers to existing var with =property().
     """
     assert ast[0] == 'func', repr(ast)
     getset = ast.decorators.asList()
@@ -748,8 +736,6 @@ class Postprocessor(object):
     if modified_ast_name[-1] == '__nonzero__':
       raise NameError('Please define `__bool__` instead of `__nonzero__`. '
                       'See b/62796379 for details.')
-    if modified_ast_name[-1] == '__bool__' and not self._py3output:
-      modified_ast_name[-1] = '__nonzero__'
     _set_name(f.name, _fix_special_names(modified_ast_name), ns,
               allow_fqcppname=True)
     if ast.returns and ast.returns.asList() == [['', [['self']]]]:

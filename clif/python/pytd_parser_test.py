@@ -14,11 +14,8 @@
 
 """Tests for clif.python.pytd_parser."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import textwrap
+
 from absl.testing import absltest
 import pyparsing as pp
 from clif.python.pytd_parser import *  # pylint: disable=wildcard-import
@@ -38,7 +35,7 @@ def Parse(string):
 class PytdParserTest(absltest.TestCase):
 
   def setUp(self):
-    super(PytdParserTest, self).setUp()
+    super().setUp()
     reset_indentation()
 
   def _Parse(self, t, a, unused_b=''):

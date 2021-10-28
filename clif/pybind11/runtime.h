@@ -1,4 +1,4 @@
-// Copyright 2020 Google LLC
+// Copyright 2021 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "clif/testing/static_methods.h"
+#ifndef THIRD_PARTY_CLIF_PYBIND11_RUNTIME_H_
+#define THIRD_PARTY_CLIF_PYBIND11_RUNTIME_H_
+
+#include "Python.h"
 
 #include "third_party/pybind11/include/pybind11/pybind11.h"
 
-namespace py = pybind11;
-
-PYBIND11_MODULE(static_methods, m) {
-  py::class_<ClassWithStaticMethods>(m, "ClassWithStaticMethods")
-    .def_readwrite("a", &ClassWithStaticMethods::a_);
-  m.def("MethodWithOneArg", [](int a) {
-    return ClassWithStaticMethods::MethodWithOneArg(a);
-  });
-  m.def("MethodWithNoArgs", []() {
-    return ClassWithStaticMethods::MethodWithNoArgs();
-  });
+inline pybind11::object ConvertPyObject(PyObject* ptr) {
+  if (PyErr_Occurred() || ptr == nullptr) {
+    throw pybind11::error_already_set();
+  }
+  return pybind11::reinterpret_borrow<pybind11::object>(ptr);
 }
+
+#endif  // THIRD_PARTY_CLIF_PYBIND11_RUNTIME_H_

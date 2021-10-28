@@ -41,7 +41,7 @@ def generate_from(
   yield I + '{'
   class_name = f'{class_decl.name.native}_class'
   definition = f'py::classh<{class_decl.name.cpp_name}'
-  if not class_decl.supress_upcasts:
+  if not class_decl.suppress_upcasts:
     for base in class_decl.bases:
       if base.HasField('cpp_name'):
         definition += f', {base.cpp_name}'
@@ -106,7 +106,8 @@ def _generate_constructor(
     yield f'}}), {function_lib.generate_function_suffixes(func_decl)}'
 
   elif func_decl.name.native == '__init__':
-    yield f'{class_name}.def(py::init<{cpp_types}>());'
+    yield (f'{class_name}.def(py::init<{cpp_types}>(), '
+           f'{function_lib.generate_function_suffixes(func_decl)}')
 
   elif func_decl.constructor:
     yield (f'{class_name}.def_static("{func_decl.name.native}", '
